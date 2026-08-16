@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# ms3dm-web-infra .gitignore
+# PUBLIC REPO: the top priority is that no secrets or account-specific
+# identifiers ever land in git. When in doubt, do not commit it.
+# ---------------------------------------------------------------------------
+
+# --- Terraform state (contains plaintext secrets) --------------------------
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.tfstate.lock.info
+
+# --- Terraform crash logs --------------------------------------------------
+crash.log
+crash.*.log
+
+# --- Plan files (can embed secret values) ----------------------------------
+*.tfplan
+*.plan
+plan.out
+
+# --- Variable files with real values ---------------------------------------
+# Contributors commit ONLY *.tfvars.example placeholders. Real values live in
+# LOCAL, gitignored *.auto.tfvars files (or in SSM / Secrets Manager).
+*.tfvars
+*.tfvars.json
+# ...but keep example templates trackable:
+!*.tfvars.example
+
+# --- Override files (local-only overrides) ---------------------------------
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# --- Terraform CLI config (may contain credentials / tokens) ---------------
+.terraformrc
+terraform.rc
+
+# --- Lambda / build artifacts ----------------------------------------------
+build/
+dist/
+*.zip
+node_modules/
+
+# --- Credentials and environment -------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+# AWS credentials / config files that may be placed in-repo by mistake
+.aws/
+credentials
+aws_credentials
+*.credentials
+# Anything resembling access keys
+*accesskey*
+*access_key*
+*secret_key*
+
+# --- OS / editor cruft -----------------------------------------------------
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------------------
+# IMPORTANT: DO NOT ignore .terraform.lock.hcl.
+# It must be committed for reproducible provider versions.
+# (No rule above matches it; this note exists to prevent anyone adding one.)
+# ---------------------------------------------------------------------------
