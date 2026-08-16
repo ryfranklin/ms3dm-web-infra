@@ -1,24 +1,28 @@
 data "aws_caller_identity" "current" {}
 
-# GitHub Actions OIDC issuer certificate, used for the provider thumbprint.
-data "tls_certificate" "github" {
-  url = "https://token.actions.githubusercontent.com/.well-known/openid-configuration"
-}
-
-# One OIDC provider per account for GitHub Actions.
+# One OIDC provider per account for GitHub Actions. AWS validates the JWKS TLS
+# against its trusted CA store for this issuer, so the thumbprints below are
+# GitHub's published CA thumbprints (a fixed value, not the rotating leaf cert
+# that a TLS lookup would return).
 resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
-  tags            = var.tags
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+  thumbprint_list = [
+    "6938fd4d98bab03faadb97b34396831e3780aea1",
+    "1c58a3a8518e8759bf075b76b750d4f2df264fcd",
+  ]
+  tags = var.tags
 }
 
 locals {
-  # Only these GitHub refs may assume the role: pushes to main and pull requests
-  # from within the repo. Account id is not committed; it is resolved at apply.
+  # Scoped to this repo only (any ref/PR/tag within it). This org issues OIDC
+  # subjects that embed the immutable GitHub numeric IDs
+  # (repo:owner@ownerId/repo@repoId:...), so match both that form and the plain
+  # form. Still repo-scoped: no other GitHub repo can assume the role. Account id
+  # is not committed; it is resolved at apply.
   allowed_subjects = [
-    "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/main",
-    "repo:${var.github_owner}/${var.github_repo}:pull_request",
+    "repo:${var.github_owner}/${var.github_repo}:*",
+    "repo:${var.github_owner}@*/${var.github_repo}@*:*",
   ]
 }
 
