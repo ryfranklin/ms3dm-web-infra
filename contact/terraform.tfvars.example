@@ -1,0 +1,7 @@
+# Copy to terraform.auto.tfvars (gitignored) and fill in.
+# PUBLIC REPO: never commit real values.
+aws_region            = "us-east-1"
+from_address          = "owner@example.com"   # SES-verified sender
+to_address            = "owner@example.com"    # inbox that receives messages
+allowed_origins       = ["https://example.com", "https://www.example.com"]
+create_ses_identities = true
