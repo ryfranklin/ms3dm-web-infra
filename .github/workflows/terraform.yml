@@ -1,0 +1,66 @@
+name: terraform
+
+# Plan on pull requests, apply on push to main. Authenticates to AWS with the
+# GitHub OIDC role (no static keys). Manages the contact stack only; the
+# bootstrap stack (the OIDC provider and this role) is applied manually once.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contact/**"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "contact/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+  id-token: write # required to request the OIDC token
+
+concurrency:
+  group: terraform-contact
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: contact
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contact
+    env:
+      # Owner address is not committed to this repo; supplied as a repo variable.
+      TF_VAR_from_address: ${{ vars.CONTACT_EMAIL }}
+      TF_VAR_to_address: ${{ vars.CONTACT_EMAIL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan
+        run: terraform plan -input=false -no-color
+
+      - name: Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve -input=false
