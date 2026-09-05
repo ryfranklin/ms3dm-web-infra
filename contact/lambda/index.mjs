@@ -10,6 +10,9 @@
  * is set to the submitter so a reply goes straight back to them. The AWS SDK
  * v3 is provided by the Node.js 20 managed runtime, so nothing is bundled.
  *
+ * Optional Slack: when SLACK_WEBHOOK_URL is set, POST a soft-fail notification
+ * after SES (errors are logged only; DDB success still returns 200).
+ *
  * CORS is owned ONLY by the Function URL (see contact/main.tf cors block).
  * Do not set Access-Control-* here or browsers see duplicate ACAO values and
  * fail the fetch even after SES has already sent the mail.
@@ -23,6 +26,8 @@ const FROM_ADDRESS = process.env.FROM_ADDRESS;
 const TO_ADDRESS = process.env.TO_ADDRESS;
 const LEADS_TABLE_NAME = process.env.LEADS_TABLE_NAME;
 const LEAD_TTL_DAYS = Number(process.env.LEAD_TTL_DAYS || '0');
+const SLACK_WEBHOOK_URL = (process.env.SLACK_WEBHOOK_URL || '').trim();
+const CALENDLY_URL = 'https://calendly.com/ryan-franklin/30min';
 
 const ses = new SESv2Client({ region: REGION });
 const ddb = new DynamoDBClient({ region: REGION });
@@ -30,8 +35,25 @@ const ddb = new DynamoDBClient({ region: REGION });
 const s = (value) => ({ S: String(value) });
 const n = (value) => ({ N: String(value) });
 
-const MAX = { name: 100, email: 254, message: 5000, userAgent: 256 };
+const MAX = {
+  name: 100,
+  email: 254,
+  message: 5000,
+  userAgent: 256,
+  page: 500,
+  referrer: 500,
+  utm: 100,
+};
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ATTR_KEYS = [
+  'page',
+  'referrer',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+];
 
 const respond = (statusCode, payload) => ({
   statusCode,
@@ -77,8 +99,30 @@ const headerValue = (event, name) => {
   return '';
 };
 
-const buildTextBody = ({ name, email, message, receivedAt, leadId }) =>
-  [
+const extractAttribution = (data) => {
+  const attribution = {};
+  for (const key of ATTR_KEYS) {
+    const limit = key === 'page' || key === 'referrer' ? MAX.page : MAX.utm;
+    const value = clean(data[key], limit);
+    if (value) {
+      attribution[key] = value;
+    }
+  }
+  return attribution;
+};
+
+const attributionLines = (attribution) =>
+  ATTR_KEYS.filter((key) => attribution[key]).map(
+    (key) => `${key}: ${attribution[key]}`,
+  );
+
+const attributionOneLiner = (attribution) => {
+  const parts = attributionLines(attribution);
+  return parts.length ? parts.join(' | ') : '(none)';
+};
+
+const buildTextBody = ({ name, email, message, receivedAt, leadId, attribution }) => {
+  const lines = [
     'New contact via ms3dm.tech',
     '',
     `Name: ${name}`,
@@ -89,16 +133,43 @@ const buildTextBody = ({ name, email, message, receivedAt, leadId }) =>
     'Message',
     '-------',
     message,
-    '',
-    'Reply to this email to respond to the submitter.',
-  ].join('\n');
+  ];
 
-const buildHtmlBody = ({ name, email, message, receivedAt, leadId }) => {
+  const attr = attributionLines(attribution);
+  if (attr.length) {
+    lines.push('', 'Attribution', '-----------', ...attr);
+  }
+
+  lines.push('', 'Reply to this email to respond to the submitter.');
+  return lines.join('\n');
+};
+
+const buildHtmlBody = ({ name, email, message, receivedAt, leadId, attribution }) => {
   const safeName = escapeHtml(name);
   const safeEmail = escapeHtml(email);
   const safeMessage = escapeHtml(message).replace(/\n/g, '<br />');
   const safeReceived = escapeHtml(receivedAt);
   const safeLeadId = escapeHtml(leadId);
+
+  const attrRows = ATTR_KEYS.filter((key) => attribution[key])
+    .map(
+      (key) => `
+                <tr>
+                  <td style="padding:0 0 12px 0;color:#9aa3ad;width:88px;vertical-align:top;">${escapeHtml(key)}</td>
+                  <td style="padding:0 0 12px 0;color:#c5cad1;word-break:break-all;">${escapeHtml(attribution[key])}</td>
+                </tr>`,
+    )
+    .join('');
+
+  const attributionSection = attrRows
+    ? `
+              <div style="margin-top:16px;padding:16px;background:#0b0d10;border:1px solid #2a3038;border-radius:8px;">
+                <div style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#9aa3ad;margin-bottom:10px;">Attribution</div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-size:13px;line-height:1.5;">
+                  ${attrRows}
+                </table>
+              </div>`
+    : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -142,6 +213,7 @@ const buildHtmlBody = ({ name, email, message, receivedAt, leadId }) => {
                 <div style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#9aa3ad;margin-bottom:10px;">Message</div>
                 <div style="font-size:15px;line-height:1.65;color:#e8eaed;">${safeMessage}</div>
               </div>
+              ${attributionSection}
               <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:#9aa3ad;">
                 Reply to this email to respond directly to the submitter.
               </p>
@@ -155,7 +227,67 @@ const buildHtmlBody = ({ name, email, message, receivedAt, leadId }) => {
 </html>`;
 };
 
-const emitLeadCreated = ({ leadId, sourceOrigin, emailOk }) => {
+const notifySlack = async ({ name, email, leadId, receivedAt, attribution }) => {
+  if (!SLACK_WEBHOOK_URL) {
+    return null;
+  }
+
+  const attrLine = attributionOneLiner(attribution);
+  const text = [
+    `New ms3dm.tech lead: ${name} <${email}>`,
+    `Lead ID: ${leadId}`,
+    `Received: ${receivedAt}`,
+    `Attribution: ${attrLine}`,
+    `Book: ${CALENDLY_URL}`,
+  ].join('\n');
+
+  const payload = {
+    text,
+    blocks: [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: 'New ms3dm.tech lead', emoji: true },
+      },
+      {
+        type: 'section',
+        fields: [
+          { type: 'mrkdwn', text: `*Name*\n${name}` },
+          { type: 'mrkdwn', text: `*Email*\n${email}` },
+          { type: 'mrkdwn', text: `*Lead ID*\n\`${leadId}\`` },
+          { type: 'mrkdwn', text: `*Received*\n${receivedAt}` },
+        ],
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*Attribution*\n${attrLine}` },
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Open Calendly', emoji: true },
+            url: CALENDLY_URL,
+          },
+        ],
+      },
+    ],
+  };
+
+  const res = await fetch(SLACK_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Slack webhook HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return true;
+};
+
+const emitLeadCreated = ({ leadId, sourceOrigin, emailOk, slackOk }) => {
   // CloudWatch Embedded Metric Format + a plain JSON line for Logs Insights.
   const emf = {
     _aws: {
@@ -173,6 +305,7 @@ const emitLeadCreated = ({ leadId, sourceOrigin, emailOk }) => {
     lead_id: leadId,
     source_origin: sourceOrigin || 'unknown',
     email_ok: Boolean(emailOk),
+    slack_ok: slackOk,
   };
   console.log(JSON.stringify(emf));
   console.log(
@@ -181,6 +314,7 @@ const emitLeadCreated = ({ leadId, sourceOrigin, emailOk }) => {
       lead_id: leadId,
       source_origin: sourceOrigin || 'unknown',
       email_ok: Boolean(emailOk),
+      slack_ok: slackOk,
     }),
   );
 };
@@ -222,6 +356,7 @@ export const handler = async (event) => {
   const name = clean(data.fullName || data.name, MAX.name);
   const email = clean(data.email, MAX.email);
   const message = clean(data.message, MAX.message);
+  const attribution = extractAttribution(data);
 
   const errors = [];
   if (name.length < 2) errors.push('name');
@@ -261,6 +396,12 @@ export const handler = async (event) => {
     received_at_pt: s(receivedAt),
   };
 
+  for (const key of ATTR_KEYS) {
+    if (attribution[key]) {
+      item[key] = s(attribution[key]);
+    }
+  }
+
   if (userAgent) {
     item.user_agent = s(userAgent);
   }
@@ -286,8 +427,8 @@ export const handler = async (event) => {
   }
 
   const subject = `New contact from ${name} via ms3dm.tech`;
-  const text = buildTextBody({ name, email, message, receivedAt, leadId });
-  const html = buildHtmlBody({ name, email, message, receivedAt, leadId });
+  const text = buildTextBody({ name, email, message, receivedAt, leadId, attribution });
+  const html = buildHtmlBody({ name, email, message, receivedAt, leadId, attribution });
 
   let emailOk = false;
   try {
@@ -313,7 +454,19 @@ export const handler = async (event) => {
     console.error('SES send failed after lead persist:', err);
   }
 
-  emitLeadCreated({ leadId, sourceOrigin, emailOk });
+  // Soft-fail Slack: null = disabled, true = ok, false = attempted and failed.
+  let slackOk = null;
+  if (SLACK_WEBHOOK_URL) {
+    try {
+      await notifySlack({ name, email, leadId, receivedAt, attribution });
+      slackOk = true;
+    } catch (err) {
+      slackOk = false;
+      console.error('Slack notify failed after lead persist:', err);
+    }
+  }
+
+  emitLeadCreated({ leadId, sourceOrigin, emailOk, slackOk });
 
   return respond(200, { ok: true });
 };
