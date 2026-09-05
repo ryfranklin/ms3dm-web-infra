@@ -5,3 +5,9 @@ from_address          = "owner@example.com"   # SES-verified sender
 to_address            = "owner@example.com"    # inbox that receives messages
 allowed_origins       = ["https://example.com", "https://www.example.com"]
 create_ses_identities = true
+
+# Optional lead-store knobs (defaults are fine for ms3dm.tech dogfood).
+# name_prefix         = "ms3dm-contact"       # table becomes ms3dm-contact-leads
+# leads_table_name    = null                  # override full table name if needed
+# lead_ttl_days       = 730                   # ~2 years; set 0 to disable TTL
+# leads_pitr_enabled  = true

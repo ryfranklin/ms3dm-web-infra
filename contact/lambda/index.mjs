@@ -1,25 +1,36 @@
 /*
- * Contact form mail handler.
+ * Contact form mail + lead-persistence handler.
  *
  * Invoked by a Lambda Function URL (POST, JSON body) from the ms3dm.tech contact
- * form. Validates the input, drops obvious bots via a honeypot, and sends the
- * message with Amazon SES. The owner is both From and To (a note to self);
- * ReplyTo is set to the submitter so a reply goes straight back to them. The AWS
- * SDK v3 is provided by the Node.js 20 managed runtime, so nothing is bundled.
+ * form. Validates the input, drops obvious bots via a honeypot, writes the lead
+ * to DynamoDB first, then sends the message with Amazon SES. Persist-before-
+ * notify: if SES fails the lead is still stored and the client still gets 200.
+ * Return 502 only when the DynamoDB write fails (or both paths fail because
+ * write failed first). The owner is both From and To (a note to self); ReplyTo
+ * is set to the submitter so a reply goes straight back to them. The AWS SDK
+ * v3 is provided by the Node.js 20 managed runtime, so nothing is bundled.
  *
  * CORS is owned ONLY by the Function URL (see contact/main.tf cors block).
  * Do not set Access-Control-* here or browsers see duplicate ACAO values and
  * fail the fetch even after SES has already sent the mail.
  */
+import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import { randomUUID } from 'node:crypto';
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const FROM_ADDRESS = process.env.FROM_ADDRESS;
 const TO_ADDRESS = process.env.TO_ADDRESS;
+const LEADS_TABLE_NAME = process.env.LEADS_TABLE_NAME;
+const LEAD_TTL_DAYS = Number(process.env.LEAD_TTL_DAYS || '0');
 
 const ses = new SESv2Client({ region: REGION });
+const ddb = new DynamoDBClient({ region: REGION });
 
-const MAX = { name: 100, email: 254, message: 5000 };
+const s = (value) => ({ S: String(value) });
+const n = (value) => ({ N: String(value) });
+
+const MAX = { name: 100, email: 254, message: 5000, userAgent: 256 };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const respond = (statusCode, payload) => ({
@@ -55,13 +66,25 @@ const escapeHtml = (value) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
-const buildTextBody = ({ name, email, message, receivedAt }) =>
+const headerValue = (event, name) => {
+  const headers = event.headers || {};
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === target) {
+      return Array.isArray(value) ? value[0] : value;
+    }
+  }
+  return '';
+};
+
+const buildTextBody = ({ name, email, message, receivedAt, leadId }) =>
   [
     'New contact via ms3dm.tech',
     '',
     `Name: ${name}`,
     `Email: ${email}`,
     `Received: ${receivedAt}`,
+    `Lead ID: ${leadId}`,
     '',
     'Message',
     '-------',
@@ -70,11 +93,12 @@ const buildTextBody = ({ name, email, message, receivedAt }) =>
     'Reply to this email to respond to the submitter.',
   ].join('\n');
 
-const buildHtmlBody = ({ name, email, message, receivedAt }) => {
+const buildHtmlBody = ({ name, email, message, receivedAt, leadId }) => {
   const safeName = escapeHtml(name);
   const safeEmail = escapeHtml(email);
   const safeMessage = escapeHtml(message).replace(/\n/g, '<br />');
   const safeReceived = escapeHtml(receivedAt);
+  const safeLeadId = escapeHtml(leadId);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -106,8 +130,12 @@ const buildHtmlBody = ({ name, email, message, receivedAt }) => {
                   <td style="padding:0 0 12px 0;"><a href="mailto:${safeEmail}" style="color:#8ab4ff;text-decoration:none;">${safeEmail}</a></td>
                 </tr>
                 <tr>
-                  <td style="padding:0 0 16px 0;color:#9aa3ad;vertical-align:top;">Received</td>
-                  <td style="padding:0 0 16px 0;color:#c5cad1;">${safeReceived}</td>
+                  <td style="padding:0 0 12px 0;color:#9aa3ad;vertical-align:top;">Received</td>
+                  <td style="padding:0 0 12px 0;color:#c5cad1;">${safeReceived}</td>
+                </tr>
+                <tr>
+                  <td style="padding:0 0 16px 0;color:#9aa3ad;vertical-align:top;">Lead ID</td>
+                  <td style="padding:0 0 16px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#c5cad1;">${safeLeadId}</td>
                 </tr>
               </table>
               <div style="margin-top:4px;padding:16px;background:#0b0d10;border:1px solid #2a3038;border-radius:8px;">
@@ -127,6 +155,36 @@ const buildHtmlBody = ({ name, email, message, receivedAt }) => {
 </html>`;
 };
 
+const emitLeadCreated = ({ leadId, sourceOrigin, emailOk }) => {
+  // CloudWatch Embedded Metric Format + a plain JSON line for Logs Insights.
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: 'ms3dm/Contact',
+          Dimensions: [['Service']],
+          Metrics: [{ Name: 'lead_created', Unit: 'Count' }],
+        },
+      ],
+    },
+    Service: 'contact-mailer',
+    lead_created: 1,
+    lead_id: leadId,
+    source_origin: sourceOrigin || 'unknown',
+    email_ok: Boolean(emailOk),
+  };
+  console.log(JSON.stringify(emf));
+  console.log(
+    JSON.stringify({
+      event: 'lead_created',
+      lead_id: leadId,
+      source_origin: sourceOrigin || 'unknown',
+      email_ok: Boolean(emailOk),
+    }),
+  );
+};
+
 export const handler = async (event) => {
   const method =
     (event.requestContext &&
@@ -141,6 +199,14 @@ export const handler = async (event) => {
   }
   if (method !== 'POST') {
     return respond(405, { ok: false, error: 'Method not allowed.' });
+  }
+
+  if (!LEADS_TABLE_NAME) {
+    console.error('LEADS_TABLE_NAME is not configured');
+    return respond(502, {
+      ok: false,
+      error: 'The message could not be sent. Please email directly.',
+    });
   }
 
   const data = parseBody(event);
@@ -168,16 +234,62 @@ export const handler = async (event) => {
     });
   }
 
-  const receivedAt = new Date().toLocaleString('en-US', {
+  const now = new Date();
+  const receivedAtIso = now.toISOString();
+  const receivedAt = now.toLocaleString('en-US', {
     timeZone: 'America/Phoenix',
     dateStyle: 'medium',
     timeStyle: 'short',
   }) + ' PT';
 
-  const subject = `New contact from ${name} via ms3dm.tech`;
-  const text = buildTextBody({ name, email, message, receivedAt });
-  const html = buildHtmlBody({ name, email, message, receivedAt });
+  const leadId = randomUUID();
+  const sourceOrigin =
+    clean(data.source || data.origin, 200) ||
+    clean(headerValue(event, 'origin'), 200) ||
+    clean(headerValue(event, 'referer'), 200);
+  const userAgent = clean(headerValue(event, 'user-agent'), MAX.userAgent);
 
+  const item = {
+    pk: s('LEAD'),
+    sk: s(`${receivedAtIso}#${leadId}`),
+    lead_id: s(leadId),
+    name: s(name),
+    email: s(email),
+    message: s(message),
+    source_origin: s(sourceOrigin || 'unknown'),
+    received_at: s(receivedAtIso),
+    received_at_pt: s(receivedAt),
+  };
+
+  if (userAgent) {
+    item.user_agent = s(userAgent);
+  }
+
+  if (Number.isFinite(LEAD_TTL_DAYS) && LEAD_TTL_DAYS > 0) {
+    item.ttl = n(Math.floor(now.getTime() / 1000) + LEAD_TTL_DAYS * 24 * 60 * 60);
+  }
+
+  try {
+    await ddb.send(
+      new PutItemCommand({
+        TableName: LEADS_TABLE_NAME,
+        Item: item,
+        ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
+      }),
+    );
+  } catch (err) {
+    console.error('DynamoDB PutItem failed:', err);
+    return respond(502, {
+      ok: false,
+      error: 'The message could not be sent. Please email directly.',
+    });
+  }
+
+  const subject = `New contact from ${name} via ms3dm.tech`;
+  const text = buildTextBody({ name, email, message, receivedAt, leadId });
+  const html = buildHtmlBody({ name, email, message, receivedAt, leadId });
+
+  let emailOk = false;
   try {
     await ses.send(
       new SendEmailCommand({
@@ -195,13 +307,13 @@ export const handler = async (event) => {
         },
       }),
     );
+    emailOk = true;
   } catch (err) {
-    console.error('SES send failed:', err);
-    return respond(502, {
-      ok: false,
-      error: 'The message could not be sent. Please email directly.',
-    });
+    // Lead is already durable; do not fail the client for notify-only errors.
+    console.error('SES send failed after lead persist:', err);
   }
+
+  emitLeadCreated({ leadId, sourceOrigin, emailOk });
 
   return respond(200, { ok: true });
 };

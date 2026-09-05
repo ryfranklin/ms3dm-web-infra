@@ -17,3 +17,13 @@ output "log_group" {
   description = "CloudWatch log group for the Lambda."
   value       = aws_cloudwatch_log_group.lambda.name
 }
+
+output "leads_table_name" {
+  description = "DynamoDB table that stores contact leads (pk=LEAD, sk=ISO8601#uuid)."
+  value       = aws_dynamodb_table.leads.name
+}
+
+output "leads_table_arn" {
+  description = "ARN of the leads DynamoDB table."
+  value       = aws_dynamodb_table.leads.arn
+}

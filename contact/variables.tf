@@ -50,6 +50,29 @@ variable "lambda_memory" {
   default     = 256
 }
 
+variable "leads_table_name" {
+  description = "Optional explicit DynamoDB table name. Defaults to \"{name_prefix}-leads\"."
+  type        = string
+  default     = null
+}
+
+variable "lead_ttl_days" {
+  description = "Days until DynamoDB TTL deletes a lead. Set 0 to disable TTL. Default 730 (~2 years)."
+  type        = number
+  default     = 730
+
+  validation {
+    condition     = var.lead_ttl_days >= 0
+    error_message = "lead_ttl_days must be >= 0 (0 disables TTL)."
+  }
+}
+
+variable "leads_pitr_enabled" {
+  description = "Enable DynamoDB point-in-time recovery on the leads table."
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)
