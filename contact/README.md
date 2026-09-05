@@ -103,7 +103,7 @@ aws dynamodb query \
   --table-name "$(terraform -chdir=contact output -raw leads_table_name 2>/dev/null || echo ms3dm-contact-leads)" \
   --key-condition-expression 'pk = :pk' \
   --expression-attribute-values '{":pk":{"S":"LEAD"}}' \
-  --scan-index-forward false \
+  --no-scan-index-forward \
   --limit 20 \
   --region us-east-1
 ```
@@ -115,7 +115,7 @@ AWS_PROFILE=ms3dm-web aws dynamodb query \
   --table-name ms3dm-contact-leads \
   --key-condition-expression 'pk = :pk' \
   --expression-attribute-values '{":pk":{"S":"LEAD"}}' \
-  --scan-index-forward false \
+  --no-scan-index-forward \
   --limit 20 \
   --region us-east-1
 ```
