@@ -10,7 +10,6 @@ browser (contact form)
         --> DynamoDB (lead persist, first)
         --> Amazon SES (notify, best-effort)
               --> your inbox
-        --> Slack webhook (optional, soft-fail)
 ```
 
 **Persist before notify:** DynamoDB `PutItem` runs first. If SES fails, the lead
@@ -65,8 +64,7 @@ terraform apply
 
 Useful variables (see `variables.tf`): `aws_region`, `from_address`,
 `to_address`, `allowed_origins`, `create_ses_identities`, `name_prefix`,
-`leads_table_name`, `lead_ttl_days`, `leads_pitr_enabled`,
-`slack_webhook_url` (sensitive; empty disables Slack).
+`leads_table_name`, `lead_ttl_days`, `leads_pitr_enabled`.
 
 ## One-time SES verification
 
@@ -132,7 +130,5 @@ AWS_PROFILE=ms3dm-web aws dynamodb query \
   captcha if spam becomes an issue.
 - CORS is owned ONLY by the Function URL. Do not re-add `Access-Control-*`
   headers in the Lambda response.
-- Addresses are configuration. Optional `slack_webhook_url` is sensitive —
-  set it only in a local gitignored `*.auto.tfvars` file, never commit a real
-  webhook. Empty string leaves Slack disabled (handler skips the notify).
+- No secrets are stored here; addresses are configuration, not credentials.
 - This stack is the Phase 1 dogfood for the Governed Lead Capture Walk offer.

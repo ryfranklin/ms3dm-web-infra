@@ -41,7 +41,7 @@ variable "log_retention_days" {
 variable "lambda_timeout" {
   description = "Lambda timeout in seconds."
   type        = number
-  default     = 15
+  default     = 10
 }
 
 variable "lambda_memory" {
@@ -71,13 +71,6 @@ variable "leads_pitr_enabled" {
   description = "Enable DynamoDB point-in-time recovery on the leads table."
   type        = bool
   default     = true
-}
-
-variable "slack_webhook_url" {
-  description = "Optional Slack Incoming Webhook URL for lead notifications. Empty string disables Slack. Prefer setting via a local gitignored *.auto.tfvars file — never commit a real webhook."
-  type        = string
-  default     = ""
-  sensitive   = true
 }
 
 variable "tags" {

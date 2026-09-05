@@ -126,7 +126,7 @@ resource "aws_iam_role_policy" "lambda" {
 
 resource "aws_lambda_function" "mailer" {
   function_name    = local.function_name
-  description      = "Persists ms3dm.tech contact leads to DynamoDB and notifies via SES (optional Slack)."
+  description      = "Persists ms3dm.tech contact leads to DynamoDB and notifies via SES."
   role             = aws_iam_role.lambda.arn
   runtime          = "nodejs20.x"
   handler          = "index.handler"
@@ -137,13 +137,11 @@ resource "aws_lambda_function" "mailer" {
 
   environment {
     variables = {
-      FROM_ADDRESS       = var.from_address
-      TO_ADDRESS         = var.to_address
-      ALLOWED_ORIGINS    = join(",", var.allowed_origins)
-      LEADS_TABLE_NAME   = aws_dynamodb_table.leads.name
-      LEAD_TTL_DAYS      = tostring(var.lead_ttl_days)
-      # Empty string disables Slack notify in the handler.
-      SLACK_WEBHOOK_URL  = var.slack_webhook_url
+      FROM_ADDRESS     = var.from_address
+      TO_ADDRESS       = var.to_address
+      ALLOWED_ORIGINS  = join(",", var.allowed_origins)
+      LEADS_TABLE_NAME = aws_dynamodb_table.leads.name
+      LEAD_TTL_DAYS    = tostring(var.lead_ttl_days)
     }
   }
 
