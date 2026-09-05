@@ -10,6 +10,7 @@ browser (contact form)
         --> DynamoDB (lead persist, first)
         --> Amazon SES (notify, best-effort)
               --> your inbox
+        --> Slack webhook (optional, soft-fail)
 ```
 
 **Persist before notify:** DynamoDB `PutItem` runs first. If SES fails, the lead
@@ -43,6 +44,9 @@ provided by the Node.js 20 runtime, so nothing is bundled.
 | `name`, `email`, `message` | Validated form fields |
 | `source_origin` | Body `source`/`origin`, else `Origin` / `Referer` header |
 | `user_agent` | Truncated request User-Agent |
+| `page` | Optional pathname (+ search) from the browser |
+| `referrer` | Optional `document.referrer` |
+| `utm_source` / `utm_medium` / `utm_campaign` / `utm_content` / `utm_term` | Optional UTM params (max 100 chars each) |
 | `received_at` | ISO8601 UTC |
 | `received_at_pt` | Display string in America/Phoenix |
 | `ttl` | Epoch seconds when `lead_ttl_days > 0` (default 730) |
@@ -61,7 +65,8 @@ terraform apply
 
 Useful variables (see `variables.tf`): `aws_region`, `from_address`,
 `to_address`, `allowed_origins`, `create_ses_identities`, `name_prefix`,
-`leads_table_name`, `lead_ttl_days`, `leads_pitr_enabled`.
+`leads_table_name`, `lead_ttl_days`, `leads_pitr_enabled`,
+`slack_webhook_url` (sensitive; empty disables Slack).
 
 ## One-time SES verification
 
@@ -127,5 +132,7 @@ AWS_PROFILE=ms3dm-web aws dynamodb query \
   captcha if spam becomes an issue.
 - CORS is owned ONLY by the Function URL. Do not re-add `Access-Control-*`
   headers in the Lambda response.
-- No secrets are stored here; addresses are configuration, not credentials.
+- Addresses are configuration. Optional `slack_webhook_url` is sensitive —
+  set it only in a local gitignored `*.auto.tfvars` file, never commit a real
+  webhook. Empty string leaves Slack disabled (handler skips the notify).
 - This stack is the Phase 1 dogfood for the Governed Lead Capture Walk offer.
