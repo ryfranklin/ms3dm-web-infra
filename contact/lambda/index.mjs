@@ -10,9 +10,6 @@
  * is set to the submitter so a reply goes straight back to them. The AWS SDK
  * v3 is provided by the Node.js 20 managed runtime, so nothing is bundled.
  *
- * Optional Slack: when SLACK_WEBHOOK_URL is set, POST a soft-fail notification
- * after SES (errors are logged only; DDB success still returns 200).
- *
  * CORS is owned ONLY by the Function URL (see contact/main.tf cors block).
  * Do not set Access-Control-* here or browsers see duplicate ACAO values and
  * fail the fetch even after SES has already sent the mail.
@@ -26,8 +23,6 @@ const FROM_ADDRESS = process.env.FROM_ADDRESS;
 const TO_ADDRESS = process.env.TO_ADDRESS;
 const LEADS_TABLE_NAME = process.env.LEADS_TABLE_NAME;
 const LEAD_TTL_DAYS = Number(process.env.LEAD_TTL_DAYS || '0');
-const SLACK_WEBHOOK_URL = (process.env.SLACK_WEBHOOK_URL || '').trim();
-const CALENDLY_URL = 'https://calendly.com/ryan-franklin/30min';
 
 const ses = new SESv2Client({ region: REGION });
 const ddb = new DynamoDBClient({ region: REGION });
@@ -115,11 +110,6 @@ const attributionLines = (attribution) =>
   ATTR_KEYS.filter((key) => attribution[key]).map(
     (key) => `${key}: ${attribution[key]}`,
   );
-
-const attributionOneLiner = (attribution) => {
-  const parts = attributionLines(attribution);
-  return parts.length ? parts.join(' | ') : '(none)';
-};
 
 const buildTextBody = ({ name, email, message, receivedAt, leadId, attribution }) => {
   const lines = [
@@ -227,67 +217,7 @@ const buildHtmlBody = ({ name, email, message, receivedAt, leadId, attribution }
 </html>`;
 };
 
-const notifySlack = async ({ name, email, leadId, receivedAt, attribution }) => {
-  if (!SLACK_WEBHOOK_URL) {
-    return null;
-  }
-
-  const attrLine = attributionOneLiner(attribution);
-  const text = [
-    `New ms3dm.tech lead: ${name} <${email}>`,
-    `Lead ID: ${leadId}`,
-    `Received: ${receivedAt}`,
-    `Attribution: ${attrLine}`,
-    `Book: ${CALENDLY_URL}`,
-  ].join('\n');
-
-  const payload = {
-    text,
-    blocks: [
-      {
-        type: 'header',
-        text: { type: 'plain_text', text: 'New ms3dm.tech lead', emoji: true },
-      },
-      {
-        type: 'section',
-        fields: [
-          { type: 'mrkdwn', text: `*Name*\n${name}` },
-          { type: 'mrkdwn', text: `*Email*\n${email}` },
-          { type: 'mrkdwn', text: `*Lead ID*\n\`${leadId}\`` },
-          { type: 'mrkdwn', text: `*Received*\n${receivedAt}` },
-        ],
-      },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*Attribution*\n${attrLine}` },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Open Calendly', emoji: true },
-            url: CALENDLY_URL,
-          },
-        ],
-      },
-    ],
-  };
-
-  const res = await fetch(SLACK_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Slack webhook HTTP ${res.status}: ${body.slice(0, 200)}`);
-  }
-  return true;
-};
-
-const emitLeadCreated = ({ leadId, sourceOrigin, emailOk, slackOk }) => {
+const emitLeadCreated = ({ leadId, sourceOrigin, emailOk }) => {
   // CloudWatch Embedded Metric Format + a plain JSON line for Logs Insights.
   const emf = {
     _aws: {
@@ -305,7 +235,6 @@ const emitLeadCreated = ({ leadId, sourceOrigin, emailOk, slackOk }) => {
     lead_id: leadId,
     source_origin: sourceOrigin || 'unknown',
     email_ok: Boolean(emailOk),
-    slack_ok: slackOk,
   };
   console.log(JSON.stringify(emf));
   console.log(
@@ -314,7 +243,6 @@ const emitLeadCreated = ({ leadId, sourceOrigin, emailOk, slackOk }) => {
       lead_id: leadId,
       source_origin: sourceOrigin || 'unknown',
       email_ok: Boolean(emailOk),
-      slack_ok: slackOk,
     }),
   );
 };
@@ -454,19 +382,7 @@ export const handler = async (event) => {
     console.error('SES send failed after lead persist:', err);
   }
 
-  // Soft-fail Slack: null = disabled, true = ok, false = attempted and failed.
-  let slackOk = null;
-  if (SLACK_WEBHOOK_URL) {
-    try {
-      await notifySlack({ name, email, leadId, receivedAt, attribution });
-      slackOk = true;
-    } catch (err) {
-      slackOk = false;
-      console.error('Slack notify failed after lead persist:', err);
-    }
-  }
-
-  emitLeadCreated({ leadId, sourceOrigin, emailOk, slackOk });
+  emitLeadCreated({ leadId, sourceOrigin, emailOk });
 
   return respond(200, { ok: true });
 };

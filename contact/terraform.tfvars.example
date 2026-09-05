@@ -12,6 +12,3 @@ create_ses_identities = true
 # lead_ttl_days       = 730                   # ~2 years; set 0 to disable TTL
 # leads_pitr_enabled  = true
 
-# Optional Slack Incoming Webhook (leave empty to disable). Never commit a real URL.
-# slack_webhook_url = ""
-
